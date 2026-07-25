@@ -17,7 +17,7 @@ import requests
 # ---------------------------------------------------------------------------
 GITHUB_TOKEN    = os.environ["GITHUB_TOKEN"]
 GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 MAX_FILE_CHARS  = int(os.environ.get("MAX_FILE_CHARS",  "8000"))
 MAX_TOTAL_CHARS = int(os.environ.get("MAX_TOTAL_CHARS", "60000"))
 MAX_RETRIES     = int(os.environ.get("MAX_RETRIES", "5"))
@@ -163,18 +163,21 @@ def build_diff_context(repo, files, head_sha):
 def call_gemini(pr_title, pr_body, diff_context):
     system_prompt = (
         "You are an expert code reviewer. You will be given a pull request title, "
-        "description, and the changed files. Provide a thorough, constructive review:\n"
+        "description, and the changed files (which include the diff/patches and nearby code context).\n\n"
+        "Provide a thorough, constructive review focusing on correctness, security, performance, and breaking changes:\n"
         "- Summarise what the PR does.\n"
-        "- Highlight bugs, security issues, or logic errors.\n"
-        "- Point out style / maintainability concerns.\n"
+        "- Highlight any critical correctness issues, security bugs, performance bottlenecks, or breaking changes.\n"
+        "- CRITICAL: Do NOT report minor style preferences, syntax formatting suggestions, or nitpicks.\n"
+        "- POST-PROCESSING FILTER: Only surface/list findings where your confidence level is 80% or higher. "
+        "For any issue found, assign a confidence level (e.g. 'Confidence: 90%') and make sure to omit anything below 80%.\n"
         "- Suggest improvements with concrete examples where helpful.\n"
-        "- End with an overall verdict: ✅ Approve / ⚠️ Request changes / ❌ Major issues.\n"
-        "Be concise but complete. Use markdown formatting."
+        "- End with an overall verdict: ✅ Approve / ⚠️ Request changes / ❌ Major issues.\n\n"
+        "Be concise, clear, and action-oriented. Use markdown formatting."
     )
     user_content = (
         f"## PR Title\n{pr_title}\n\n"
         f"## PR Description\n{pr_body or '_No description provided._'}\n\n"
-        f"## Changed Files\n{diff_context}"
+        f"## Changed Files (Diff & Nearby Code Context)\n{diff_context}"
     )
 
     payload = {

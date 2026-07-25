@@ -32,13 +32,10 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Wait to avoid rate limits
-        run: sleep 30
-
       - name: Run review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-1.5-flash
+          GEMINI_MODEL: gemini-2.5-flash
           MAX_RETRIES: "5"
         run: python .kimi-reviewer/scripts/review_pr.py
