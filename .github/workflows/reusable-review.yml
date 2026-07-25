@@ -1,0 +1,40 @@
+name: Reusable PR Review
+
+on:
+  workflow_call:
+    secrets:
+      OPENROUTER_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+
+      - name: Checkout reviewer scripts
+        uses: actions/checkout@v4
+        with:
+          repository: skyspec28/Maulome-Review-bot-
+          path: .kimi-reviewer
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          KIMI_MODEL: moonshotai/kimi-k2
+        run: python .kimi-reviewer/scripts/review_pr.py
