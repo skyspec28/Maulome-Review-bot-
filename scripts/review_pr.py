@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import json
+import time
 import requests
 
 # ---------------------------------------------------------------------------
@@ -156,9 +157,9 @@ def build_diff_context(repo, files, head_sha):
 
 
 # ---------------------------------------------------------------------------
-# Gemini API call
+# Gemini API call (with retry + exponential backoff for 429 rate limits)
 # ---------------------------------------------------------------------------
-def call_gemini(pr_title, pr_body, diff_context):
+def call_gemini(pr_title, pr_body, diff_context, max_retries=3):
     system_prompt = (
         "You are an expert code reviewer. You will be given a pull request title, "
         "description, and the changed files. Provide a thorough, constructive review:\n"
@@ -189,10 +190,25 @@ def call_gemini(pr_title, pr_body, diff_context):
     }
 
     url = f"{GEMINI_API}?key={GEMINI_API_KEY}"
-    resp = requests.post(url, json=payload, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    for attempt in range(1, max_retries + 1):
+        resp = requests.post(url, json=payload, timeout=120)
+
+        if resp.status_code == 429:
+            # Respect Retry-After header if present, else exponential backoff
+            retry_after = int(resp.headers.get("Retry-After", 0))
+            wait = retry_after if retry_after > 0 else min(15 * (2 ** (attempt - 1)), 60)
+            print(f"Rate limited (429). Attempt {attempt}/{max_retries}. "
+                  f"Waiting {wait}s before retry…")
+            time.sleep(wait)
+            continue
+
+        resp.raise_for_status()
+        data = resp.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    sys.exit(f"Gemini API still returning 429 after {max_retries} retries. "
+             "Try again in a few minutes.")
 
 
 # ---------------------------------------------------------------------------
