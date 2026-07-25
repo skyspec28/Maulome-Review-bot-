@@ -17,7 +17,7 @@ import requests
 # ---------------------------------------------------------------------------
 GITHUB_TOKEN    = os.environ["GITHUB_TOKEN"]
 GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 MAX_FILE_CHARS  = int(os.environ.get("MAX_FILE_CHARS",  "8000"))
 MAX_TOTAL_CHARS = int(os.environ.get("MAX_TOTAL_CHARS", "60000"))
 MAX_RETRIES     = int(os.environ.get("MAX_RETRIES", "5"))

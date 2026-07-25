@@ -36,6 +36,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-2.5-flash
+          GEMINI_MODEL: gemini-3.5-flash
           MAX_RETRIES: "5"
         run: python .kimi-reviewer/scripts/review_pr.py
