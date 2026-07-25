@@ -164,15 +164,22 @@ def call_gemini(pr_title, pr_body, diff_context):
     system_prompt = (
         "You are an expert code reviewer. You will be given a pull request title, "
         "description, and the changed files (which include the diff/patches and nearby code context).\n\n"
-        "Provide a thorough, constructive review focusing on correctness, security, performance, and breaking changes:\n"
-        "- Summarise what the PR does.\n"
-        "- Highlight any critical correctness issues, security bugs, performance bottlenecks, or breaking changes.\n"
-        "- CRITICAL: Do NOT report minor style preferences, syntax formatting suggestions, or nitpicks.\n"
-        "- POST-PROCESSING FILTER: Only surface/list findings where your confidence level is 80% or higher. "
-        "For any issue found, assign a confidence level (e.g. 'Confidence: 90%') and make sure to omit anything below 80%.\n"
-        "- Suggest improvements with concrete examples where helpful.\n"
-        "- End with an overall verdict: ✅ Approve / ⚠️ Request changes / ❌ Major issues.\n\n"
-        "Be concise, clear, and action-oriented. Use markdown formatting."
+        "Conduct a detailed, thorough, and constructive review. Specifically analyze the changes for:\n"
+        "1. **Correctness**: Logical errors, edge cases, error handling, state inconsistency, or race conditions.\n"
+        "2. **Security**: Vulnerabilities, credential leaks, improper input validation, or injection risks.\n"
+        "3. **Performance**: Inefficient queries, memory leaks, slow algorithms, or redundant operations.\n"
+        "4. **Breaking Changes**: Backward-compatibility issues, API signature modifications, or database schema changes.\n\n"
+        "CRITICAL REVIEW GUIDELINES:\n"
+        "- Focus strictly on high-impact issues. Do NOT report minor style preferences, syntax formatting suggestions, or nitpicks.\n"
+        "- Only surface/list findings where your confidence level is 80% or higher. For each finding, list the category (e.g., 'Security'), a clear explanation of the issue, a concrete code improvement suggestion, and your confidence level (e.g., 'Confidence: 85%').\n"
+        "- Go through every file in the diff and look for potential issues in all 4 categories above.\n\n"
+        "Output Format:\n"
+        "### Summary of Changes\n"
+        "[Provide a summary of what the PR accomplishes]\n\n"
+        "### Detailed Findings (Confidence >= 80%)\n"
+        "[List findings with confidence level, category, description, and code suggestions. If no high-confidence issues are found, state that explicitly]\n\n"
+        "### Verdict\n"
+        "✅ Approve / ⚠️ Request changes / ❌ Major issues"
     )
     user_content = (
         f"## PR Title\n{pr_title}\n\n"
@@ -189,7 +196,7 @@ def call_gemini(pr_title, pr_body, diff_context):
         ],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 4096,
         },
     }
 
