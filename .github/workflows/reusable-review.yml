@@ -3,7 +3,7 @@ name: Reusable PR Review
 on:
   workflow_call:
     secrets:
-      OPENROUTER_API_KEY:
+      GEMINI_API_KEY:
         required: true
 
 permissions:
@@ -35,6 +35,6 @@ jobs:
       - name: Run review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          KIMI_MODEL: moonshotai/kimi-k2
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-2.0-flash
         run: python .kimi-reviewer/scripts/review_pr.py

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Kimi PR Reviewer — powered by OpenRouter.
-Fetches the PR diff/files, sends them to the configured model, then
+Maulome PR Reviewer — powered by Google Gemini.
+Fetches the PR diff/files, sends them to Gemini, then
 posts (or edits) a single review comment on the PR.
 """
 
@@ -14,17 +14,20 @@ import requests
 # ---------------------------------------------------------------------------
 # Configuration (override via env vars in the workflow)
 # ---------------------------------------------------------------------------
-GITHUB_TOKEN        = os.environ["GITHUB_TOKEN"]
-OPENROUTER_API_KEY  = os.environ["OPENROUTER_API_KEY"]
-KIMI_MODEL          = os.environ.get("KIMI_MODEL", "moonshotai/kimi-k2")
-MAX_FILE_CHARS      = int(os.environ.get("MAX_FILE_CHARS",  "8000"))
-MAX_TOTAL_CHARS     = int(os.environ.get("MAX_TOTAL_CHARS", "60000"))
+GITHUB_TOKEN    = os.environ["GITHUB_TOKEN"]
+GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+MAX_FILE_CHARS  = int(os.environ.get("MAX_FILE_CHARS",  "8000"))
+MAX_TOTAL_CHARS = int(os.environ.get("MAX_TOTAL_CHARS", "60000"))
 
-GITHUB_API          = "https://api.github.com"
-OPENROUTER_API      = "https://openrouter.ai/api/v1/chat/completions"
-COMMENT_MARKER      = "<!-- kimi-pr-reviewer -->"
+GITHUB_API      = "https://api.github.com"
+GEMINI_API      = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
+COMMENT_MARKER  = "<!-- maulome-pr-reviewer -->"
 
-# Files to skip (add patterns as needed)
+# Files to skip
 SKIP_PATTERNS = [
     r"\.lock$",
     r"package-lock\.json$",
@@ -51,7 +54,6 @@ def gh_headers():
 
 
 def get_pr_info():
-    """Read PR metadata from the GITHUB_EVENT_PATH payload."""
     event_path = os.environ.get("GITHUB_EVENT_PATH", "")
     if not event_path or not os.path.exists(event_path):
         sys.exit("GITHUB_EVENT_PATH not set or file missing.")
@@ -124,7 +126,7 @@ def build_diff_context(repo, files, head_sha):
     total = 0
     for f in files:
         filename = f["filename"]
-        status   = f["status"]          # added / modified / removed / renamed
+        status   = f["status"]
         if should_skip(filename):
             continue
 
@@ -154,9 +156,9 @@ def build_diff_context(repo, files, head_sha):
 
 
 # ---------------------------------------------------------------------------
-# OpenRouter call
+# Gemini API call
 # ---------------------------------------------------------------------------
-def call_openrouter(pr_title, pr_body, diff_context):
+def call_gemini(pr_title, pr_body, diff_context):
     system_prompt = (
         "You are an expert code reviewer. You will be given a pull request title, "
         "description, and the changed files. Provide a thorough, constructive review:\n"
@@ -172,22 +174,25 @@ def call_openrouter(pr_title, pr_body, diff_context):
         f"## PR Description\n{pr_body or '_No description provided._'}\n\n"
         f"## Changed Files\n{diff_context}"
     )
+
     payload = {
-        "model": KIMI_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_content},
+        "system_instruction": {
+            "parts": [{"text": system_prompt}]
+        },
+        "contents": [
+            {"role": "user", "parts": [{"text": user_content}]}
         ],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 2048,
+        },
     }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/skyspec28/Maulome-Review-bot-",
-        "X-Title": "Maulome PR Reviewer",
-    }
-    resp = requests.post(OPENROUTER_API, headers=headers, json=payload, timeout=120)
+
+    url = f"{GEMINI_API}?key={GEMINI_API_KEY}"
+    resp = requests.post(url, json=payload, timeout=120)
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    data = resp.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +210,13 @@ def main():
         print("No reviewable files found — skipping.")
         return
 
-    print(f"Calling {KIMI_MODEL} via OpenRouter …")
-    review_text = call_openrouter(pr_title, pr_body, diff_context)
+    print(f"Calling {GEMINI_MODEL} via Google AI …")
+    review_text = call_gemini(pr_title, pr_body, diff_context)
 
     body = (
         f"{COMMENT_MARKER}\n"
         f"## 🤖 Maulome PR Review\n"
-        f"*Model: `{KIMI_MODEL}`*\n\n"
+        f"*Model: `{GEMINI_MODEL}`*\n\n"
         f"{review_text}\n\n"
         f"---\n*Powered by [Maulome Review Bot](https://github.com/skyspec28/Maulome-Review-bot-)*"
     )
