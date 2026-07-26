@@ -4,12 +4,12 @@ Maulome PR Reviewer — powered by Google Gemini.
 
 Workflow:
 1. Fetch PR files/diff via GitHub API.
-2. Send diff + context to Gemini, asking for structured JSON findings.
-3. Validate each finding's line number against the actual diff hunks.
-4. Post an inline GitHub PR review with:
-   - Inline comments anchored to changed lines (with ```suggestion``` blocks
-     where Gemini supplies a replacement — renders a "Commit suggestion" button).
-   - A top-level summary comment for general findings that aren't line-anchored.
+2. Build diff context with line-numbered file content so Gemini can cite exact lines.
+3. Send to Gemini with a structured per-finding prompt.
+4. Post (or edit) a single PR issue comment with:
+   - Summary of what the PR does.
+   - Per-finding blocks: file + line + category + explanation + concrete fix snippet.
+   - Verdict (✅ / ⚠️ / ❌).
 """
 
 import os
@@ -100,43 +100,28 @@ def get_file_content(repo, path, ref):
     return None
 
 
-def dismiss_existing_reviews(repo, pr_number):
-    """Find any previous Maulome review and delete its top-level summary comment."""
+def find_existing_comment(repo, pr_number):
     url = f"{GITHUB_API}/repos/{repo}/issues/{pr_number}/comments"
     resp = requests.get(url, headers=gh_headers())
     resp.raise_for_status()
     for c in resp.json():
         if COMMENT_MARKER in c.get("body", ""):
-            del_url = f"{GITHUB_API}/repos/{repo}/issues/comments/{c['id']}"
-            requests.delete(del_url, headers=gh_headers())
-            print(f"Deleted stale summary comment (id={c['id']}).")
+            return c["id"]
+    return None
 
 
-def post_pr_review(repo, pr_number, head_sha, summary_body, inline_comments):
-    """
-    Post a GitHub PR review with optional inline comments.
-    inline_comments: list of dicts with keys: path, line, body (may include ```suggestion``` block).
-    """
-    url = f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}/reviews"
-    payload = {
-        "commit_id": head_sha,
-        "event": "COMMENT",
-        "body": summary_body,
-        "comments": inline_comments,
-    }
-    resp = requests.post(url, headers=gh_headers(), json=payload)
-    if not resp.ok:
-        # If inline comments fail (e.g. bad line numbers slipped through),
-        # fall back to submitting without them so we don't lose the summary.
-        print(f"Review POST failed ({resp.status_code}): {resp.text[:300]}")
-        print("Retrying without inline comments…")
-        payload["comments"] = []
-        resp = requests.post(url, headers=gh_headers(), json=payload)
-        resp.raise_for_status()
-        print("Posted summary-only review (inline comments were dropped).")
-    else:
-        print(f"Posted PR review with {len(inline_comments)} inline comment(s).")
-    return resp.json()
+def post_comment(repo, pr_number, body):
+    url = f"{GITHUB_API}/repos/{repo}/issues/{pr_number}/comments"
+    resp = requests.post(url, headers=gh_headers(), json={"body": body})
+    resp.raise_for_status()
+    print(f"Posted new review comment (id={resp.json()['id']}).")
+
+
+def edit_comment(repo, comment_id, body):
+    url = f"{GITHUB_API}/repos/{repo}/issues/comments/{comment_id}"
+    resp = requests.patch(url, headers=gh_headers(), json={"body": body})
+    resp.raise_for_status()
+    print(f"Updated existing review comment (id={comment_id}).")
 
 
 # ---------------------------------------------------------------------------
@@ -146,45 +131,16 @@ def should_skip(filename):
     return any(re.search(pat, filename) for pat in SKIP_PATTERNS)
 
 
-def parse_hunk_lines(patch: str) -> set[int]:
-    """
-    Parse a unified diff patch string and return the set of RIGHT-SIDE (new-file)
-    line numbers that appear in the diff hunks. Only these lines are valid targets
-    for inline comments — GitHub rejects comments on lines outside hunk context.
-    """
-    valid_lines: set[int] = set()
-    if not patch:
-        return valid_lines
-
-    current_line = 0
-    for raw_line in patch.splitlines():
-        # Hunk header: @@ -old_start,old_count +new_start,new_count @@
-        hunk_match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw_line)
-        if hunk_match:
-            current_line = int(hunk_match.group(1))
-            continue
-        if raw_line.startswith("-"):
-            # Deletion — doesn't advance new-file line number
-            continue
-        if raw_line.startswith("+"):
-            valid_lines.add(current_line)
-            current_line += 1
-        else:
-            # Context line — advances both old and new
-            valid_lines.add(current_line)
-            current_line += 1
-
-    return valid_lines
-
-
 def build_diff_context(repo, files, head_sha):
     """
-    Build a rich text context string for Gemini, AND return a mapping of
-    filename → set of valid diff line numbers for later validation.
+    Build the text context sent to Gemini.
+    Each file gets:
+      - The raw unified diff (so Gemini knows what actually changed).
+      - The full post-merge file content with line numbers in 'NNNNN | code' format,
+        so Gemini can cite exact line numbers in its findings.
     """
     parts = []
     total = 0
-    patch_lines: dict[str, set[int]] = {}   # filename → valid line numbers
 
     for f in files:
         filename = f["filename"]
@@ -193,13 +149,17 @@ def build_diff_context(repo, files, head_sha):
             continue
 
         patch = f.get("patch", "")
-        patch_lines[filename] = parse_hunk_lines(patch)
-
         content = ""
         if status != "removed":
             raw = get_file_content(repo, filename, head_sha)
             if raw:
-                content = raw[:MAX_FILE_CHARS]
+                truncated = raw[:MAX_FILE_CHARS]
+                # Number every line so Gemini can cite exact line numbers
+                numbered = "\n".join(
+                    f"{i + 1:>5} | {line}"
+                    for i, line in enumerate(truncated.splitlines())
+                )
+                content = numbered
                 if len(raw) > MAX_FILE_CHARS:
                     content += f"\n... [truncated — {len(raw) - MAX_FILE_CHARS} chars omitted]"
 
@@ -207,11 +167,7 @@ def build_diff_context(repo, files, head_sha):
         if patch:
             chunk += f"**Diff:**\n```diff\n{patch}\n```\n"
         if content:
-            ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
-            chunk += f"**Full file (line numbers shown for reference):**\n```{ext}\n"
-            for i, line in enumerate(content.splitlines(), start=1):
-                chunk += f"{i}: {line}\n"
-            chunk += "```\n"
+            chunk += f"**Full file (line-numbered):**\n```\n{content}\n```\n"
 
         if total + len(chunk) > MAX_TOTAL_CHARS:
             parts.append(f"### `{filename}` — skipped (total size limit reached)\n")
@@ -219,37 +175,40 @@ def build_diff_context(repo, files, head_sha):
         parts.append(chunk)
         total += len(chunk)
 
-    return "\n".join(parts), patch_lines
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
-# Gemini API call — returns structured JSON findings
+# Gemini API call — returns structured markdown review text
 # ---------------------------------------------------------------------------
-def call_gemini(pr_title, pr_body, diff_context) -> list[dict]:
+def call_gemini(pr_title, pr_body, diff_context) -> str:
     system_prompt = (
         "You are an expert code reviewer. You will be given a pull request title, "
-        "description, and changed files showing line-numbered source code and unified diffs.\n\n"
-        "Your job is to produce a thorough code review as a JSON array. "
-        "Analyze every file in the diff for:\n"
-        "1. Correctness — logical errors, missing error handling, edge cases, state inconsistency, race conditions.\n"
-        "2. Security — credential leaks, injection risks, unsafe deserialization, improper validation.\n"
-        "3. Performance — inefficient queries (N+1), memory leaks, slow algorithms, missing indexes.\n"
-        "4. Breaking Changes — API signature changes, DB schema changes, removed functionality.\n\n"
-        "OUTPUT RULES (strictly follow):\n"
-        "- Return ONLY a raw JSON array. No markdown fences, no prose, no explanation outside the array.\n"
-        "- Each element must be an object with these exact keys:\n"
-        '  {"path": str, "line": int, "category": str, "confidence": int, "description": str, "suggestion": str|null}\n'
-        "- `path`: the file path exactly as shown in the diff headers.\n"
-        "- `line`: the RIGHT-SIDE (new file) line number from the diff. Must be a line that appears "
-        "in a +/context line of the diff for that file. Use 0 if the finding applies to the whole file.\n"
-        "- `category`: one of 'Correctness', 'Security', 'Performance', 'Breaking Change'.\n"
-        "- `confidence`: integer 0-100. Only include findings with confidence >= 80.\n"
-        "- `description`: clear explanation of the issue (2-5 sentences max).\n"
-        "- `suggestion`: the exact replacement code for that line (or null if not applicable). "
-        "This will be rendered as a GitHub suggestion block — it must be a drop-in line replacement, not prose.\n"
-        "- Omit any finding with confidence < 80.\n"
-        "- Do NOT include style preferences, formatting nitpicks, or minor naming suggestions.\n"
-        "- If there are no high-confidence findings, return an empty array: []\n"
+        "description, and changed files. Each file's full content is shown with "
+        "line numbers in the format 'NNNNN | code' — use these exact numbers when citing lines. "
+        "Diffs (unified format) are also shown so you know what actually changed.\n\n"
+        "Analyze the changes for:\n"
+        "1. Correctness — logical errors, edge cases, error handling, state inconsistency, race conditions.\n"
+        "2. Security — vulnerabilities, credential leaks, injection risks, improper input validation.\n"
+        "3. Performance — inefficient queries, memory leaks, slow algorithms, redundant operations.\n"
+        "4. Breaking Changes — backward-compat issues, API signature changes, schema changes.\n\n"
+        "RULES:\n"
+        "- Only report findings with confidence >= 80%.\n"
+        "- Only report issues in code that was actually added/changed in the diff — not pre-existing code you're just seeing for context.\n"
+        "- No style/formatting nitpicks.\n"
+        "- For EVERY finding, you MUST give: the exact file path, the exact line number "
+        "(from the numbered file content), a one-line issue title, a short explanation of why "
+        "it's a problem, and a concrete fix — either a short corrected code snippet or precise steps to fix it.\n\n"
+        "Output format — repeat this block per finding, nothing else outside it:\n\n"
+        "### [N]. <Short issue title>\n"
+        "**File:** `path/to/file.py` — **Line:** <number>\n"
+        "**Category:** <Correctness|Security|Performance|Breaking Change> — **Confidence:** <NN>%\n"
+        "**Issue:** <1-3 sentence explanation>\n"
+        "**Fix:**\n```<lang>\n<corrected snippet or precise fix steps>\n```\n\n"
+        "Start with a 2-3 sentence '### Summary' of what the PR does, then list findings under "
+        "'### Detailed Findings', then end with '### Verdict' "
+        "(✅ Approve / ⚠️ Request changes / ❌ Major issues). "
+        "If there are no findings above 80% confidence, say so explicitly under Detailed Findings."
     )
 
     user_content = (
@@ -280,79 +239,17 @@ def call_gemini(pr_title, pr_body, diff_context) -> list[dict]:
             continue
 
         resp.raise_for_status()
-        raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        data = resp.json()
+        candidate = data["candidates"][0]
 
-        # Strip any accidental markdown fences the model adds around the JSON
-        raw_text = raw_text.strip()
-        raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
-        raw_text = re.sub(r"\s*```$", "", raw_text)
+        # Warn if the model was cut off before finishing
+        finish_reason = candidate.get("finishReason", "")
+        if finish_reason not in ("STOP", ""):
+            print(f"Warning: Gemini finishReason={finish_reason!r} — response may be truncated.")
 
-        try:
-            findings = json.loads(raw_text)
-            if not isinstance(findings, list):
-                raise ValueError("Gemini returned a non-list JSON value.")
-            return findings
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"Warning: Could not parse Gemini response as JSON: {e}")
-            print(f"Raw response (first 500 chars):\n{raw_text[:500]}")
-            # Return a single general finding so we at least surface the raw output
-            return [{
-                "path": "",
-                "line": 0,
-                "category": "Correctness",
-                "confidence": 80,
-                "description": (
-                    "The review model returned an unparseable response. "
-                    "Raw output:\n\n```\n" + raw_text[:2000] + "\n```"
-                ),
-                "suggestion": None,
-            }]
+        return candidate["content"]["parts"][0]["text"]
 
     sys.exit(f"Gemini API still returning 429 after {MAX_RETRIES} retries.")
-
-
-# ---------------------------------------------------------------------------
-# Build the review payload
-# ---------------------------------------------------------------------------
-def build_review_payload(findings: list[dict], patch_lines: dict[str, set[int]]):
-    """
-    Split findings into:
-    - inline_comments: anchored to a specific valid diff line (with optional suggestion block)
-    - general_findings: whole-file or unanchorable findings → go in the top-level summary
-    """
-    inline_comments = []
-    general_findings = []
-
-    for f in findings:
-        path = f.get("path", "")
-        line = f.get("line", 0)
-        category   = f.get("category", "General")
-        confidence = f.get("confidence", 80)
-        description = f.get("description", "")
-        suggestion  = f.get("suggestion")
-
-        # Build the comment body
-        body = f"**[{category}]** (Confidence: {confidence}%)\n\n{description}"
-        if suggestion:
-            body += f"\n\n```suggestion\n{suggestion}\n```"
-
-        # Validate: line must be in the actual diff hunk for this file
-        valid_lines = patch_lines.get(path, set())
-        if path and line > 0 and line in valid_lines:
-            inline_comments.append({
-                "path": path,
-                "line": line,
-                "side": "RIGHT",
-                "body": body,
-            })
-        else:
-            # Fall back to a general finding (will appear in the top-level summary)
-            location = f"`{path}` line {line}" if path else "General"
-            general_findings.append(f"### [{category}] — {location} (Confidence: {confidence}%)\n\n{description}")
-            if suggestion:
-                general_findings[-1] += f"\n\n**Suggested fix:**\n```\n{suggestion}\n```"
-
-    return inline_comments, general_findings
 
 
 # ---------------------------------------------------------------------------
@@ -365,51 +262,27 @@ def main():
     files = get_pr_files(repo, pr_number)
     print(f"Files changed: {len(files)}")
 
-    diff_context, patch_lines = build_diff_context(repo, files, head_sha)
+    diff_context = build_diff_context(repo, files, head_sha)
     if not diff_context.strip():
         print("No reviewable files found — skipping.")
         return
 
     print(f"Calling {GEMINI_MODEL} via Google AI …")
-    findings = call_gemini(pr_title, pr_body, diff_context)
-    print(f"Gemini returned {len(findings)} finding(s).")
+    review_text = call_gemini(pr_title, pr_body, diff_context)
 
-    # Filter to >= 80% confidence (model should already do this, belt + braces)
-    findings = [f for f in findings if f.get("confidence", 0) >= 80]
-    print(f"After confidence filter: {len(findings)} finding(s).")
-
-    inline_comments, general_findings = build_review_payload(findings, patch_lines)
-    print(f"Inline: {len(inline_comments)}, General: {len(general_findings)}")
-
-    # Build the top-level review body
-    verdict_line = ""
-    if not findings:
-        verdict_line = "✅ **No high-confidence issues found — looks good to merge.**"
-    else:
-        verdict_line = "⚠️ **Review complete — see inline comments and findings below.**"
-
-    summary_parts = [
-        COMMENT_MARKER,
-        f"## 🤖 Maulome PR Review",
-        f"*Model: `{GEMINI_MODEL}`*\n",
-        verdict_line,
-    ]
-
-    if general_findings:
-        summary_parts.append("\n---\n### 📋 General Findings (not anchored to a specific line)\n")
-        summary_parts.extend(general_findings)
-
-    summary_parts.append(
-        "\n---\n*Powered by [Maulome Review Bot](https://github.com/skyspec28/Maulome-Review-bot-)*"
+    body = (
+        f"{COMMENT_MARKER}\n"
+        f"## 🤖 Maulome PR Review\n"
+        f"*Model: `{GEMINI_MODEL}`*\n\n"
+        f"{review_text}\n\n"
+        f"---\n*Powered by [Maulome Review Bot](https://github.com/skyspec28/Maulome-Review-bot-)*"
     )
 
-    summary_body = "\n".join(summary_parts)
-
-    # Delete old summary comment from previous runs (inline review comments
-    # are immutable per-review, so we just post a new review each time)
-    dismiss_existing_reviews(repo, pr_number)
-
-    post_pr_review(repo, pr_number, head_sha, summary_body, inline_comments)
+    comment_id = find_existing_comment(repo, pr_number)
+    if comment_id:
+        edit_comment(repo, comment_id, body)
+    else:
+        post_comment(repo, pr_number, body)
 
 
 if __name__ == "__main__":
