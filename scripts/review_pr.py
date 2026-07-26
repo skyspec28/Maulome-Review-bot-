@@ -157,16 +157,37 @@ def parse_hunk_lines(patch: str) -> set:
     if not patch:
         return valid
     current = 0
+    in_hunk = False
     for raw in patch.splitlines():
         m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw)
         if m:
             current = int(m.group(1))
+            in_hunk = True
+            continue
+        if not in_hunk:
             continue
         if raw.startswith("-"):
             continue           # deletion — doesn't advance new-file line number
         valid.add(current)
         current += 1           # addition (+) or context line both advance it
     return valid
+
+
+def snap_to_nearest_hunk_line(line: int, valid_lines: set, window: int = 5) -> int:
+    """
+    If `line` is not in `valid_lines`, find the closest valid line within ±window.
+    Returns the snapped line number, or 0 if nothing is close enough.
+    This prevents valid findings from being silently demoted to the summary
+    because Gemini's line number is off by 1-2 due to diff context.
+    """
+    if line in valid_lines:
+        return line
+    for delta in range(1, window + 1):
+        if line + delta in valid_lines:
+            return line + delta
+        if line - delta in valid_lines:
+            return line - delta
+    return 0
 
 
 def build_diff_context(repo, files, head_sha):
@@ -229,30 +250,33 @@ def call_gemini(pr_title, pr_body, diff_context) -> list:
     system_prompt = (
         "You are an expert code reviewer. You will be given a pull request title, "
         "description, and changed files. Each file's full content is shown with line numbers "
-        "in the format 'NNNNN | code' — use these exact numbers when citing lines. "
+        "in the format 'NNNNN | code' — use these EXACT numbers when citing lines. "
         "Unified diffs are also shown so you know what actually changed.\n\n"
-        "Analyze every file for:\n"
+        "Analyze every changed file for:\n"
         "1. Correctness — logical errors, missing error handling, edge cases, state inconsistency, race conditions.\n"
         "2. Security — credential leaks, injection risks, unsafe deserialization, improper validation.\n"
         "3. Performance — inefficient queries (N+1), memory leaks, slow algorithms, missing indexes.\n"
         "4. Breaking Changes — API signature changes, DB schema changes, removed functionality.\n\n"
-        "OUTPUT RULES — follow strictly:\n"
+        "OUTPUT RULES — follow ALL of these strictly:\n"
         "- Return ONLY a raw JSON array. No markdown fences, no prose outside the array.\n"
-        "- Each element must be an object with exactly these keys:\n"
-        '  {"path": str, "line": int, "category": str, "confidence": int, "description": str, "suggestion": str|null}\n'
-        "- `path`: the exact file path from the diff headers.\n"
-        "- `line`: the RIGHT-SIDE (new-file) line number from the numbered file content. "
-        "Must be a line that appears in a +/context line of the diff patch for that file. "
-        "Use 0 only if the finding genuinely applies to the whole file with no specific line.\n"
+        "- Each element is a JSON object with EXACTLY these keys (no extras, no omissions):\n"
+        '  {"path": str, "line": int, "category": str, "confidence": int, "description": str, "suggestion": str}\n'
+        "- `path`: the exact file path as shown in the diff header (e.g. 'backend/scripts/foo.py').\n"
+        "- `line`: a line number from the NUMBERED FILE CONTENT (e.g. from '  142 | some_code()'). "
+        "It MUST be a line that appears in the unified diff patch for that file (a + line or context line). "
+        "Do NOT use line 0 — always pick the most specific relevant line inside the diff.\n"
         "- `category`: one of 'Correctness', 'Security', 'Performance', 'Breaking Change'.\n"
-        "- `confidence`: integer 0–100. Only include findings >= 80.\n"
-        "- `description`: clear explanation of the issue, 2–5 sentences.\n"
-        "- `suggestion`: a drop-in replacement for that exact line — this will be placed inside "
-        "a GitHub ```suggestion``` block. Must be valid code, not prose. null if not applicable.\n"
-        "- Omit findings below 80% confidence.\n"
-        "- Only flag code that was added/changed in the diff, not pre-existing context.\n"
-        "- No style preferences, no naming nitpicks, no formatting suggestions.\n"
-        "- Return [] if there are no high-confidence findings.\n"
+        "- `confidence`: integer 0–100. ONLY include findings with confidence >= 80.\n"
+        "- `description`: 2–4 sentence explanation of the problem. Do NOT include code here.\n"
+        "- `suggestion`: REQUIRED for every finding. This is a direct drop-in replacement for "
+        "the code at `line` — it will be rendered as a GitHub 'Apply suggestion' button. "
+        "Preserve indentation exactly. If the fix requires removing the line, use an empty string. "
+        "If a fix genuinely cannot be expressed as a single-line replacement, provide the closest "
+        "corrected version of that line.\n"
+        "- Never set `suggestion` to null, a prose string, or an explanation — ALWAYS valid code.\n"
+        "- Only report issues in lines that are ADDED or CHANGED in the diff (+ lines), not pre-existing context.\n"
+        "- No style preferences, no formatting nitpicks, no naming suggestions.\n"
+        "- Return [] if there are zero high-confidence findings.\n"
     )
 
     user_content = (
@@ -322,8 +346,11 @@ def call_gemini(pr_title, pr_body, diff_context) -> list:
 def build_review_payload(findings: list, patch_lines: dict):
     """
     Splits findings into:
-    - inline_comments: anchored to a valid diff line, with ```suggestion``` block if applicable.
-    - general_findings: whole-file or unanchorable — go in the top-level summary body.
+    - inline_comments: anchored to a valid diff line, each with a ```suggestion``` block.
+    - general_findings: findings that cannot be anchored — go in the top-level summary body.
+
+    Uses snap_to_nearest_hunk_line() to tolerate ±5 line off-by-one errors from Gemini
+    instead of silently demoting the finding to the summary.
     """
     inline_comments = []
     general_findings = []
@@ -334,24 +361,28 @@ def build_review_payload(findings: list, patch_lines: dict):
         category    = f.get("category", "General")
         confidence  = f.get("confidence", 80)
         description = f.get("description", "")
-        suggestion  = f.get("suggestion")
+        suggestion  = f.get("suggestion") or ""
+
+        # Snap to the nearest valid hunk line (tolerates ±5 off-by-one from Gemini)
+        valid_lines = patch_lines.get(path, set())
+        anchored_line = snap_to_nearest_hunk_line(line, valid_lines) if path and line > 0 else 0
 
         body = f"**[{category}]** (Confidence: {confidence}%)\n\n{description}"
-        if suggestion:
+        if suggestion.strip():
             body += f"\n\n```suggestion\n{suggestion}\n```"
 
-        valid_lines = patch_lines.get(path, set())
-        if path and line > 0 and line in valid_lines:
+        if path and anchored_line > 0:
             inline_comments.append({
                 "path": path,
-                "line": line,
+                "line": anchored_line,
                 "side": "RIGHT",
                 "body": body,
             })
         else:
+            # Genuine whole-file finding or completely outside all hunks
             location = f"`{path}` line {line}" if path else "General"
             entry = f"### [{category}] — {location} (Confidence: {confidence}%)\n\n{description}"
-            if suggestion:
+            if suggestion.strip():
                 entry += f"\n\n**Suggested fix:**\n```\n{suggestion}\n```"
             general_findings.append(entry)
 
