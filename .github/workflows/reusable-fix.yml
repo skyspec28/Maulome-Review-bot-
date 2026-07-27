@@ -1,0 +1,60 @@
+name: Reusable PR Fix
+
+on:
+  workflow_call:
+    secrets:
+      GEMINI_API_KEY:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+        with:
+          # Fetch all history and checkout the PR head branch rather than the merge commit,
+          # so we can commit and push back directly.
+          ref: ${{ github.event.pull_request.head.ref || github.event.issue.pull_request && format('refs/pull/{0}/head', github.event.issue.number) }}
+          fetch-depth: 0
+
+      # Since refs/pull/.../head is read-only, if the checkout detached the HEAD,
+      # we need to checkout the actual branch name to push back.
+      - name: Switch to head branch
+        run: |
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          if [ -z "$BRANCH_NAME" ]; then
+            # If issue_comment, we query PR info via GitHub CLI to get the head branch
+            PR_NUMBER="${{ github.event.issue.number }}"
+            BRANCH_NAME=$(gh pr view "$PR_NUMBER" --json headRefName --template '{{.headRefName}}')
+          fi
+          echo "Head branch is $BRANCH_NAME"
+          git checkout "$BRANCH_NAME"
+
+      - name: Checkout reviewer scripts
+        uses: actions/checkout@v4
+        with:
+          repository: skyspec28/Maulome-Review-bot-
+          path: .kimi-reviewer
+          ref: feat/maulome-fix   # Checkout our test branch so we can test the new script
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run fix script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.5-flash
+          MAX_RETRIES: "5"
+        run: python .kimi-reviewer/scripts/maulome_fix.py
