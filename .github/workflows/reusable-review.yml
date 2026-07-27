@@ -23,7 +23,7 @@ jobs:
         with:
           repository: skyspec28/Maulome-Review-bot-
           path: .kimi-reviewer
-          ref: feat/maulome-fix
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5

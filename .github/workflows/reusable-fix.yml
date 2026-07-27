@@ -41,7 +41,7 @@ jobs:
         with:
           repository: skyspec28/Maulome-Review-bot-
           path: .kimi-reviewer
-          ref: feat/maulome-fix   # Checkout our test branch so we can test the new script
+          ref: main   # Checkout our test branch so we can test the new script
 
       - name: Set up Python
         uses: actions/setup-python@v5
