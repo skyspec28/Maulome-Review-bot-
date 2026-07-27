@@ -311,7 +311,15 @@ def call_gemini(pr_title, pr_body, diff_context) -> list:
             time.sleep(wait)
             continue
 
+        if resp.status_code in (500, 502, 503, 504):
+            wait = min(15 * (2 ** (attempt - 1)), 120)
+            print(f"Gemini {resp.status_code} (transient). Attempt {attempt}/{MAX_RETRIES}. Waiting {wait}s…")
+            time.sleep(wait)
+            continue
+
+        # Any other non-2xx status is a hard error
         resp.raise_for_status()
+
         data     = resp.json()
         candidate = data["candidates"][0]
 
@@ -339,7 +347,7 @@ def call_gemini(pr_title, pr_body, diff_context) -> list:
                 "suggestion": "",
             }]
 
-    sys.exit(f"Gemini API still returning 429 after {MAX_RETRIES} retries.")
+    sys.exit(f"Gemini API still failing after {MAX_RETRIES} retries (last status: {resp.status_code}).")
 
 
 # ---------------------------------------------------------------------------

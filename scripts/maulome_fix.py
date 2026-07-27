@@ -32,6 +32,18 @@ GEMINI_API_URL  = (
     f"{GEMINI_MODEL}:generateContent"
 )
 
+SKIP_PATTERNS = [
+    r"\.lock$", r"package-lock\.json$", r"yarn\.lock$",
+    r"\.min\.(js|css)$", r"dist/", r"build/", r"__pycache__/", r"\.pyc$",
+    r"\.png$", r"\.jpg$", r"\.jpeg$", r"\.gif$", r"\.svg$", r"\.ico$",
+    r"\.pdf$", r"\.zip$", r"\.tar$",
+]
+
+
+def should_skip(filename):
+    import re
+    return any(re.search(pat, filename) for pat in SKIP_PATTERNS)
+
 
 # ---------------------------------------------------------------------------
 # GitHub helpers
@@ -159,6 +171,13 @@ def call_gemini_for_fix(file_path, file_content, line_number, instruction, origi
             time.sleep(wait)
             continue
 
+        if resp.status_code in (500, 502, 503, 504):
+            wait = min(15 * (2 ** (attempt - 1)), 120)
+            print(f"Gemini {resp.status_code} (transient). Attempt {attempt}/{MAX_RETRIES}. Waiting {wait}s…")
+            time.sleep(wait)
+            continue
+
+        # Any other non-2xx status is a hard error
         resp.raise_for_status()
         raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         
@@ -174,7 +193,7 @@ def call_gemini_for_fix(file_path, file_content, line_number, instruction, origi
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: JSON parse failed: {e}\nRaw (first 500):\n{raw[:500]}")
 
-    sys.exit(f"Gemini API still returning 429 after {MAX_RETRIES} retries.")
+    sys.exit(f"Gemini API still failing after {MAX_RETRIES} retries (last status: {resp.status_code}).")
 
 
 # ---------------------------------------------------------------------------
