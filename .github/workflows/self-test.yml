@@ -1,4 +1,4 @@
-name: Maulome PR Review & Fix
+name: Maulome PR Review & Fix Self-Test
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ permissions:
 jobs:
   review:
     if: github.event_name == 'pull_request'
-    uses: skyspec28/Maulome-Review-bot-/.github/workflows/reusable-review.yml@main
+    uses: skyspec28/Maulome-Review-bot-/.github/workflows/reusable-review.yml@feat/maulome-fix
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
@@ -24,6 +24,6 @@ jobs:
     if: |
       (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@maulome fix')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@maulome fix'))
-    uses: skyspec28/Maulome-Review-bot-/.github/workflows/reusable-fix.yml@main
+    uses: skyspec28/Maulome-Review-bot-/.github/workflows/reusable-fix.yml@feat/maulome-fix
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
